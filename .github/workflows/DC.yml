@@ -1,4 +1,4 @@
-name: M3U8 to Repo
+name: M3U8 to DC
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
         description: "Slug"
         required: true
       webhooklist:
-        description: "List webhook (cách nhau bằng dấu phẩy, chỉ phần ID/token)"
+        description: "List"
         required: true
 
 jobs:
@@ -19,12 +19,12 @@ jobs:
 
     steps:
       # =======================
-      # Setup FFmpeg + PHP
+      # Setup FFmpeg + Python
       # =======================
-      - name: Install ffmpeg + php
+      - name: Install ffmpeg + python
         run: |
           sudo apt update
-          sudo apt install -y ffmpeg curl jq php
+          sudo apt install -y ffmpeg curl jq python3
 
       # =======================
       # b1: Download m3u8 → mp4
@@ -79,6 +79,30 @@ jobs:
           HOOK=""
           HOOK_ID=""
 
+          encode_py=$(cat <<'PYCODE'
+          import sys, hashlib
+          def encode(s, key="zzo0ozz"):
+              key = hashlib.sha1(key.encode()).hexdigest()
+              j = 0
+              out = ""
+              for ch in s:
+                  ordStr = ord(ch)
+                  if j == len(key): j = 0
+                  ordKey = ord(key[j])
+                  j += 1
+                  val = ordStr + ordKey
+                  h = format(val, "x")
+                  n = int(h, 16)
+                  b36 = ""
+                  while n>0:
+                      n, r = divmod(n, 36)
+                      b36 = "0123456789abcdefghijklmnopqrstuvwxyz"[r] + b36
+                  out += b36[::-1]
+              return out
+          print(encode(sys.argv[1]))
+          PYCODE
+          )
+
           for f in output/*.html; do
             [ -e "$f" ] || continue
             path=$(basename "$f" .html)
@@ -107,26 +131,8 @@ jobs:
               SAVE="output/${{ inputs.slug }}.m3u8"
               M3U8=$(cat "$SAVE")
 
-              # define encode() inline and encode từng phần
-              read -r ENC_HOOK_ID ENC_DC_ID <<EOF
-              $(php -r '
-              function encode($string,$key="zzo0ozz") {
-                $key = sha1($key);
-                $strLen = strlen($string);
-                $keyLen = strlen($key);
-                $j=0; $hash="";
-                for ($i=0; $i<$strLen; $i++) {
-                  $ordStr = ord(substr($string,$i,1));
-                  if ($j == $keyLen) { $j = 0; }
-                  $ordKey = ord(substr($key,$j,1));
-                  $j++;
-                  $hash .= strrev(base_convert(dechex($ordStr + $ordKey),16,36));
-                }
-                return $hash;
-              }
-              echo encode("'"${HOOK_ID}"'"), " ", encode("'"${DC_ID}"'");
-              ')
-              EOF
+              ENC_HOOK_ID=$(python3 -c "$encode_py" "$HOOK_ID")
+              ENC_DC_ID=$(python3 -c "$encode_py" "$DC_ID")
 
               FAKEM3U8=$(echo "$M3U8" | sed "s|$path|/imeCDN/${ENC_HOOK_ID}/${ENC_DC_ID}|g")
               echo "$FAKEM3U8" > "$SAVE"
