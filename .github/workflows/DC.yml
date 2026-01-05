@@ -84,6 +84,8 @@ jobs:
             rm -f "$f"
 
             IDX=$((RANDOM % ${#WEBHOOKS[@]}))
+            HOOK_PART="${WEBHOOKS[$IDX]}"
+            HOOK_ID="${HOOK_PART%%/*}"
             HOOK="https://discord.com/api/webhooks/${WEBHOOKS[$IDX]}"
 
             RESPONSE=$(curl -s -X POST "$HOOK" \
@@ -98,7 +100,7 @@ jobs:
             if [ "${#DC_ID}" -eq 19 ]; then
               SAVE="output/${{ inputs.slug }}.m3u8"
               M3U8=$(cat "$SAVE")
-              FAKEM3U8=$(echo "$M3U8" | sed "s|$path|/imeCDN/${DC_ID}|g")
+              FAKEM3U8=$(echo "$M3U8" | sed "s|$path|/imeCDN/${HOOK_ID}/${DC_ID}|g")
               echo "$FAKEM3U8" > "$SAVE"
               rm -f "output_jpg/${path}.jpg"
             fi
@@ -137,7 +139,7 @@ jobs:
             echo "M3U8 file not found"
             exit 1
           fi
-          curl -X POST "https://hit.ssplay.net/m3u8.php?slug=${{ inputs.slug }}" \
+          curl -X POST "https://hit.ssplay.net/m3u81.php?slug=${{ inputs.slug }}" \
             -H "Content-Type: text/plain" \
             --data-binary @"$M3U8_FILE"
 
