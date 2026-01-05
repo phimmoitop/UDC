@@ -1,0 +1,152 @@
+name: M3U8 to Repo
+
+on:
+  workflow_dispatch:
+    inputs:
+      link:
+        description: "Link"
+        required: true
+      slug:
+        description: "Slug"
+        required: true
+      webhooklist:
+        description: "List webhook (cách nhau bằng dấu phẩy)"
+        required: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # =======================
+      # Setup FFmpeg
+      # =======================
+      - name: Install ffmpeg
+        run: |
+          sudo apt update
+          sudo apt install -y ffmpeg curl jq
+
+      # =======================
+      # b1: Download m3u8 → mp4
+      # =======================
+      - name: Download m3u8 to mp4
+        run: |
+          ffmpeg -i "${{ inputs.link }}" -c copy -bsf:a aac_adtstoasc "${{ inputs.slug }}.mp4"
+
+      # =======================
+      # b2: Verify mp4
+      # =======================
+      - name: Verify mp4
+        run: |
+          FILE="${{ inputs.slug }}.mp4"
+          if [ ! -f "$FILE" ]; then
+            echo "File not found"
+            exit 1
+          fi
+          SIZE=$(stat -c%s "$FILE")
+          if [ "$SIZE" -lt 1000000 ]; then
+            echo "File too small: $SIZE bytes"
+            exit 1
+          fi
+          echo "Verify OK: $SIZE bytes"
+
+      # =======================
+      # b3: Convert mp4 → HLS
+      # =======================
+      - name: Convert H264 to HLS (.m3u8)
+        run: |
+          mkdir -p output
+          ffmpeg -i "${{ inputs.slug }}.mp4" \
+            -map 0:v:0 -map 0:a:0 \
+            -c:v copy -c:a aac -profile:a aac_low -ar 48000 -ac 2 -b:a 128k \
+            -start_number 10001 -hls_time 4 -hls_list_size 0 \
+            -hls_segment_type fmp4 \
+            -hls_fmp4_init_filename "${{ inputs.slug }}-index.html" \
+            -hls_segment_filename "output/${{ inputs.slug }}-index%d.html" \
+            -f hls "output/${{ inputs.slug }}.m3u8"
+
+      # =======================
+      # b4: Convert HTML → JPG + Upload to Discord
+      # =======================
+      - name: Convert HTML segments to JPG and upload
+        run: |
+          mkdir -p output_jpg
+          IMG1=$(curl -s https://raw.githubusercontent.com/phimmoitop/UDC/main/0.txt)
+
+          IFS=',' read -ra WEBHOOKS <<< "${{ inputs.webhooklist }}"
+          COUNT=0
+
+          for f in output/*.html; do
+            [ -e "$f" ] || continue
+            path=$(basename "$f" .html)
+            IMG2=$(cat "$f")
+            echo "$IMG1$IMG2" > "output_jpg/${path}.jpg"
+            rm -f "$f"
+
+            IDX=$((RANDOM % ${#WEBHOOKS[@]}))
+            HOOK="${WEBHOOKS[$IDX]}"
+
+            RESPONSE=$(curl -s -X POST "$HOOK" \
+              -H "Content-Type: multipart/form-data" \
+              -F "content=$path" \
+              -F "tts=false" \
+              -F "file=@output_jpg/${path}.jpg;type=image/jpg;filename=0.jpg")
+
+            DC_ID=$(echo "$RESPONSE" | jq -r '.id')
+            echo "Uploaded $path → $DC_ID"
+
+            if [ "${#DC_ID}" -eq 19 ]; then
+              SAVE="output/${{ inputs.slug }}.m3u8"
+              M3U8=$(cat "$SAVE")
+              FAKEM3U8=$(echo "$M3U8" | sed "s|$path|/imeCDN/${DC_ID}|g")
+              echo "$FAKEM3U8" > "$SAVE"
+              rm -f "output_jpg/${path}.jpg"
+            fi
+
+            COUNT=$((COUNT+1))
+            if [ $COUNT -eq 5 ]; then
+              COUNT=0
+              sleep 1
+            fi
+          done
+
+      # =======================
+      # b5: SUCCESS callback
+      # =======================
+      - name: Callback success
+        if: success()
+        run: |
+          FILESIZE=$(du -sb output | awk '{print $1}')
+          DURATION=$(ffprobe -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            "${{ inputs.slug }}.mp4" | cut -d. -f1)
+
+          curl -G "https://cp.ssplay.net/cf-dc.php" \
+            --data-urlencode "dc=5" \
+            --data-urlencode "slug=${{ inputs.slug }}"
+
+      # =======================
+      # b6: Send m3u8 to hit.ssplay.net
+      # =======================
+      - name: Send m3u8 to hit.ssplay.net
+        if: success()
+        run: |
+          M3U8_FILE="output/${{ inputs.slug }}.m3u8"
+          if [ ! -f "$M3U8_FILE" ]; then
+            echo "M3U8 file not found"
+            exit 1
+          fi
+          curl -X POST "https://hit.ssplay.net/m3u8.php?slug=${{ inputs.slug }}" \
+            -H "Content-Type: text/plain" \
+            --data-binary @"$M3U8_FILE"
+
+      # =======================
+      # FAILURE callback
+      # =======================
+      - name: Callback failure
+        if: failure()
+        run: |
+          curl -G "https://cp.ssplay.net/cf-dc.php" \
+            --data-urlencode "dc=10" \
+            --data-urlencode "slug=${{ inputs.slug }}"
