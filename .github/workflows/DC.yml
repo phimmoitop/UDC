@@ -1,4 +1,4 @@
-name: M3U8 to DC
+name: M3U8 to Repo
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
         description: "Slug"
         required: true
       webhooklist:
-        description: "List"
+        description: "List webhook (cách nhau bằng dấu phẩy, chỉ phần ID/token)"
         required: true
 
 jobs:
@@ -66,31 +66,29 @@ jobs:
             -f hls "output/${{ inputs.slug }}.m3u8"
 
       # =======================
-      # b4: Convert HTML → JPG + Upload to Discord (encode Python, webhook đổi mỗi 5 file)
+      # b4: Convert HTML → JPG + Upload to Discord (fix null byte, encode bằng file Python)
       # =======================
       - name: Convert HTML segments to JPG and upload
         run: |
           mkdir -p output_jpg
-          IMG1=$(curl -s https://raw.githubusercontent.com/phimmoitop/UDC/main/0.txt)
 
-          # Parse webhook list
-          IFS=',' read -ra WEBHOOKS <<< "${{ inputs.webhooklist }}"
-          COUNT=0
-          IDX=-1
-          HOOK=""
-          HOOK_ID=""
+          # Loại null byte khỏi IMG1 để tránh cảnh báo và lỗi shell
+          IMG1=$(curl -s https://raw.githubusercontent.com/phimmoitop/UDC/main/0.txt | tr -d '\000')
 
-          # Python encode: mỗi kí tự -> base36 2 ký tự (pad 0), rồi đảo
-          read -r -d '' ENCODE_PY <<'PYCODE'
+          # Viết encode.py ra file để chạy ổn định
+          cat > encode.py <<'PYCODE'
           import sys, hashlib
           def to_base36(val):
               chars = "0123456789abcdefghijklmnopqrstuvwxyz"
               if val == 0:
-                  return "0"
+                  return "00"  # đảm bảo ra 2 ký tự
               out = ""
               while val > 0:
                   val, r = divmod(val, 36)
                   out = chars[r] + out
+              # pad về 2 ký tự
+              if len(out) < 2:
+                  out = ("0" * (2 - len(out))) + out
               return out
           
           def encode(s, key="zzo0ozz"):
@@ -104,20 +102,26 @@ jobs:
                   ordKey = ord(key[j])
                   j += 1
                   val = ordStr + ordKey
-                  b36 = to_base36(int(format(val, "x"), 16))  # base36 của hex(val)
-                  # pad về đúng 2 ký tự rồi đảo (khớp decode đọc cặp 2 ký tự + strrev)
-                  if len(b36) < 2:
-                      b36 = ("0" * (2 - len(b36))) + b36
-                  out += b36[::-1]
-              print(out)
+                  # base36 của (val) rồi đảo từng cặp
+                  b36_2 = to_base36(val)[::-1]
+                  out += b36_2
+              return out
+          
           if __name__ == "__main__":
-              encode(sys.argv[1])
+              s = sys.argv[1]
+              print(encode(s))
           PYCODE
+
+          # Parse webhook list
+          IFS=',' read -ra WEBHOOKS <<< "${{ inputs.webhooklist }}"
+          COUNT=0
+          IDX=-1
+          HOOK=""
+          HOOK_ID=""
 
           for f in output/*.html; do
             [ -e "$f" ] || continue
 
-            # Tên tệp không đuôi + đuôi .html
             base=$(basename "$f" .html)
             full="${base}.html"
 
@@ -150,9 +154,8 @@ jobs:
               SAVE="output/${{ inputs.slug }}.m3u8"
               M3U8=$(cat "$SAVE")
 
-              # Encode riêng từng phần
-              ENC_HOOK_ID=$(python3 -c "$ENCODE_PY" "$HOOK_ID")
-              ENC_DC_ID=$(python3 -c "$ENCODE_PY" "$DC_ID")
+              ENC_HOOK_ID=$(python3 encode.py "$HOOK_ID")
+              ENC_DC_ID=$(python3 encode.py "$DC_ID")
 
               # Thay thế chính xác theo tên tệp đầy đủ (có .html)
               NEW_PATH="/imeCDN/${ENC_HOOK_ID}/${ENC_DC_ID}.html"
@@ -165,7 +168,6 @@ jobs:
             fi
 
             COUNT=$((COUNT+1))
-            # nghỉ nhẹ sau mỗi 5 file
             if [ $((COUNT % 5)) -eq 0 ]; then
               sleep 1
             fi
