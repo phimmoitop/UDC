@@ -1,4 +1,4 @@
-name: M3U8 to Repo
+name: M3U8 to DC
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
         description: "Slug"
         required: true
       webhooklist:
-        description: "List webhook (cách nhau bằng dấu phẩy, chỉ phần ID/token)"
+        description: "List"
         required: true
 
 jobs:
@@ -66,50 +66,57 @@ jobs:
             -f hls "output/${{ inputs.slug }}.m3u8"
 
       # =======================
-      # b4: Convert HTML → JPG + Upload to Discord (fix null byte, encode bằng file Python)
+      # b4: Convert HTML → JPG + Upload to Discord
       # =======================
       - name: Convert HTML segments to JPG and upload
         run: |
           mkdir -p output_jpg
 
-          # Loại null byte khỏi IMG1 để tránh cảnh báo và lỗi shell
+          # Loại null byte khỏi IMG1
           IMG1=$(curl -s https://raw.githubusercontent.com/phimmoitop/UDC/main/0.txt | tr -d '\000')
 
-          # Viết encode.py ra file để chạy ổn định
+          # Viết encode.py mô phỏng chính xác hàm PHP
           cat > encode.py <<'PYCODE'
-          import sys, hashlib
-          def to_base36(val):
+          import sys
+          import hashlib
+
+          def base_convert(n, from_base, to_base):
+              # Chuyển n (ở hệ from_base) sang thập phân trước
+              decimal_n = int(str(n), from_base)
+              if decimal_n == 0:
+                  return "0"
+              # Chuyển thập phân sang hệ to_base
               chars = "0123456789abcdefghijklmnopqrstuvwxyz"
-              if val == 0:
-                  return "00"  # đảm bảo ra 2 ký tự
-              out = ""
-              while val > 0:
-                  val, r = divmod(val, 36)
-                  out = chars[r] + out
-              # pad về 2 ký tự
-              if len(out) < 2:
-                  out = ("0" * (2 - len(out))) + out
-              return out
-          
-          def encode(s, key="zzo0ozz"):
-              key = hashlib.sha1(key.encode()).hexdigest()
+              res = ""
+              while decimal_n > 0:
+                  decimal_n, r = divmod(decimal_n, to_base)
+                  res = chars[r] + res
+              return res
+
+          def encode(string, key="zzo0ozz"):
+              key_hash = hashlib.sha1(key.encode()).hexdigest()
+              str_len = len(string)
+              key_len = len(key_hash)
+              hash_out = ""
               j = 0
-              out = ""
-              for ch in s:
-                  ordStr = ord(ch)
-                  if j == len(key):
+              for i in range(str_len):
+                  ord_str = ord(string[i])
+                  if j == key_len:
                       j = 0
-                  ordKey = ord(key[j])
+                  ord_key = ord(key_hash[j])
                   j += 1
-                  val = ordStr + ordKey
-                  # base36 của (val) rồi đảo từng cặp
-                  b36_2 = to_base36(val)[::-1]
-                  out += b36_2
-              return out
-          
+                  
+                  # PHP: dechex(ordStr + ordKey)
+                  hex_val = hex(ord_str + ord_key)[2:]
+                  # PHP: base_convert(..., 16, 36)
+                  b36_val = base_convert(hex_val, 16, 36)
+                  # PHP: strrev(...)
+                  hash_out += b36_val[::-1]
+              return hash_out
+
           if __name__ == "__main__":
-              s = sys.argv[1]
-              print(encode(s))
+              if len(sys.argv) > 1:
+                  print(encode(sys.argv[1]))
           PYCODE
 
           # Parse webhook list
@@ -125,52 +132,46 @@ jobs:
             base=$(basename "$f" .html)
             full="${base}.html"
 
-            # Tạo "jpg" và xóa html gốc
+            # Tạo "jpg"
             IMG2=$(cat "$f")
             echo "$IMG1$IMG2" > "output_jpg/${base}.jpg"
             rm -f "$f"
 
-            # Chọn webhook mới mỗi chu kỳ 5 file
+            # Chọn webhook ngẫu nhiên mỗi 5 file
             if [ $((COUNT % 5)) -eq 0 ]; then
               IDX=$((RANDOM % ${#WEBHOOKS[@]}))
               HOOK_PART="${WEBHOOKS[$IDX]}"
               HOOK_ID="${HOOK_PART%%/*}"
               HOOK="https://discord.com/api/webhooks/${WEBHOOKS[$IDX]}"
-              echo ">> New webhook cycle: HOOK_ID=${HOOK_ID} (idx=${IDX})"
+              echo ">> New webhook cycle: HOOK_ID=${HOOK_ID}"
             fi
 
-            # Upload
+            # Upload lên Discord
             RESPONSE=$(curl -s -X POST "$HOOK" \
               -H "Content-Type: multipart/form-data" \
               -F "content=$base" \
-              -F "tts=false" \
               -F "file=@output_jpg/${base}.jpg;type=image/jpg;filename=0.jpg")
 
             DC_ID=$(echo "$RESPONSE" | jq -r '.id')
-            echo "Uploaded $full → Discord ID: $DC_ID"
-
-            # Nếu Discord trả id hợp lệ
-            if [ "${#DC_ID}" -eq 19 ] && [ "$DC_ID" != "null" ]; then
+            
+            if [ "${#DC_ID}" -ge 17 ] && [ "$DC_ID" != "null" ]; then
               SAVE="output/${{ inputs.slug }}.m3u8"
-              M3U8=$(cat "$SAVE")
-
+              
+              # Encode HOOK_ID và DC_ID bằng script Python mới
               ENC_HOOK_ID=$(python3 encode.py "$HOOK_ID")
               ENC_DC_ID=$(python3 encode.py "$DC_ID")
 
-              # Thay thế chính xác theo tên tệp đầy đủ (có .html)
               NEW_PATH="/imeCDN/${ENC_HOOK_ID}/${ENC_DC_ID}.html"
-              FAKEM3U8=$(echo "$M3U8" | sed "s|${full}|${NEW_PATH}|g")
-
-              echo "$FAKEM3U8" > "$SAVE"
+              
+              # Cập nhật file m3u8
+              sed -i "s|${full}|${NEW_PATH}|g" "$SAVE"
               rm -f "output_jpg/${base}.jpg"
             else
-              echo "WARN: Discord ID invalid → skip replace for $full"
+              echo "WARN: Discord ID invalid for $full"
             fi
 
             COUNT=$((COUNT+1))
-            if [ $((COUNT % 5)) -eq 0 ]; then
-              sleep 1
-            fi
+            if [ $((COUNT % 5)) -eq 0 ]; then sleep 1; fi
           done
 
       # =======================
@@ -179,12 +180,6 @@ jobs:
       - name: Callback success
         if: success()
         run: |
-          FILESIZE=$(du -sb output | awk '{print $1}')
-          DURATION=$(ffprobe -v error \
-            -show_entries format=duration \
-            -of default=noprint_wrappers=1:nokey=1 \
-            "${{ inputs.slug }}.mp4" | cut -d. -f1)
-
           curl -G "https://cp.ssplay.net/cf-dc.php" \
             --data-urlencode "dc=5" \
             --data-urlencode "slug=${{ inputs.slug }}"
@@ -196,10 +191,6 @@ jobs:
         if: success()
         run: |
           M3U8_FILE="output/${{ inputs.slug }}.m3u8"
-          if [ ! -f "$M3U8_FILE" ]; then
-            echo "M3U8 file not found"
-            exit 1
-          fi
           curl -X POST "https://hit.ssplay.net/m3u81.php?slug=${{ inputs.slug }}" \
             -H "Content-Type: text/plain" \
             --data-binary @"$M3U8_FILE"
