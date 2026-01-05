@@ -18,9 +18,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # =======================
-      # Setup Môi trường
-      # =======================
       - name: Setup Environment
         run: |
           sudo apt update
@@ -34,28 +31,27 @@ jobs:
           ffmpeg -i "${{ inputs.link }}" -c copy -bsf:a aac_adtstoasc "${{ inputs.slug }}.mp4"
 
       # =======================
-      # b2: Cắt HLS (fmp4) giống PHP
+      # b2: Cắt HLS (tạo ra các file .html thay vì .ts/fmp4)
       # =======================
       - name: Convert to HLS
         run: |
           mkdir -p output
           ffmpeg -y -i "${{ inputs.slug }}.mp4" -codec: copy \
-            -start_number 10001 -hls_time 4 \
-            -hls_flags split_by_time+independent_segments -hls_list_size 0 \
+            -start_number 10001 -hls_time 4 -hls_list_size 0 \
             -hls_segment_type fmp4 \
             -hls_fmp4_init_filename "${{ inputs.slug }}-index.html" \
             -hls_segment_filename "output/${{ inputs.slug }}-index%d.html" \
             -f hls "output/${{ inputs.slug }}.m3u8"
 
       # =======================
-      # b3: Xử lý Upload và Encode (Logic PHP)
+      # b3: Trộn ảnh, Upload và Replace M3U8
       # =======================
       - name: Process and Upload to Discord
         run: |
-          # 1. Tải file mồi JPG (0.txt) về máy, giữ nguyên định dạng nhị phân
+          # 1. Tải file mồi JPG gốc (Nhị phân)
           curl -sL https://raw.githubusercontent.com/phimmoitop/UDC/main/0.txt -o header.jpg
 
-          # 2. Tạo script Python để Encode chính xác như PHP
+          # 2. Python Script Encode (Clone logic PHP của bạn)
           cat > encode.py <<'PYCODE'
           import sys, hashlib
 
@@ -77,7 +73,7 @@ jobs:
               j = 0
               for i in range(len(string)):
                   if j == len(key_hash): j = 0
-                  # Logic: ordStr + ordKey -> dechex -> base36 -> strrev
+                  # Logic PHP: strrev(base_convert(dechex(ordStr + ordKey),16,36))
                   val_dec = ord(string[i]) + ord(key_hash[j])
                   val_hex = hex(val_dec)[2:]
                   val_b36 = base_convert(val_hex, 16, 36)
@@ -90,77 +86,78 @@ jobs:
                   print(encode(sys.argv[1]))
           PYCODE
 
-          # 3. Duyệt file và Upload
+          # 3. Duyệt danh sách file .html vừa tạo ra
           IFS=',' read -ra WEBHOOKS <<< "${{ inputs.webhooklist }}"
           M3U8_FILE="output/${{ inputs.slug }}.m3u8"
           
-          # Lấy danh sách các file segment .html
-          for f in output/*.html; do
+          # Lấy danh sách file theo đúng thứ tự
+          FILES=$(ls output/*.html)
+
+          for f in $FILES; do
             [ -e "$f" ] || continue
             
-            # Lấy tên file không có đuôi (ví dụ: slug-index10001)
-            filename=$(basename "$f" .html)
+            # Tên file gốc (ví dụ: phim-index10001)
+            filename_no_ext=$(basename "$f" .html)
             
-            # TRỘN FILE NHỊ PHÂN (QUAN TRỌNG): header.jpg + segment.html
-            cat header.jpg "$f" > "${filename}.jpg"
+            # TRỘN FILE: Nối header.jpg vào trước nội dung video .html
+            # Điều này giúp Discord nhận diện đây là file ảnh hợp lệ
+            cat header.jpg "$f" > "${filename_no_ext}.jpg"
 
             # Chọn Webhook ngẫu nhiên
             RANDOM_HOOK="${WEBHOOKS[$RANDOM % ${#WEBHOOKS[@]}]}"
             HOOK_ID="${RANDOM_HOOK%%/*}"
             HOOK_URL="https://discord.com/api/webhooks/${RANDOM_HOOK}"
 
-            # Upload bằng CURL (giả lập form-data như PHP)
+            # Upload lên Discord
             RESPONSE=$(curl -s -X POST "$HOOK_URL" \
               -H "Content-Type: multipart/form-data" \
-              -F "content=$filename" \
-              -F "file=@${filename}.jpg;type=image/jpeg;filename=0.jpg")
+              -F "content=$filename_no_ext" \
+              -F "file=@${filename_no_ext}.jpg;type=image/jpeg;filename=0.jpg")
 
-            # Trích xuất ID tin nhắn từ Discord
+            # Lấy ID từ phản hồi Discord
             DC_ID=$(echo "$RESPONSE" | jq -r '.id')
 
             if [ "${#DC_ID}" -ge 18 ] && [ "$DC_ID" != "null" ]; then
-              echo "Success: $filename -> ID: $DC_ID"
+              echo "Uploaded: $filename_no_ext -> DC_ID: $DC_ID"
               
-              # Encode HOOK_ID và DC_ID
+              # Encode theo logic PHP
               ENC_HOOK=$(python3 encode.py "$HOOK_ID")
               ENC_DC=$(python3 encode.py "$DC_ID")
 
-              # Thay thế trong file M3U8 (Giống PHP str_replace)
-              # PHP: str_replace(path, '/imeCDN/enc_hook/enc_dc', m3u8)
-              # Lưu ý: sed sẽ giữ lại đuôi .html nếu trong m3u8 có filename.html
-              NEW_PATH="/imeCDN/${ENC_HOOK}/${ENC_DC}"
-              sed -i "s|${filename}|${NEW_PATH}|g" "$M3U8_FILE"
+              # THAY THẾ TRONG M3U8:
+              # Tìm: slug-index10001.html
+              # Thay: /imeCDN/encoded_hook/encoded_dc.html
+              # (Giữ lại .html cuối cùng như yêu cầu)
+              NEW_VAL="/imeCDN/${ENC_HOOK}/${ENC_DC}.html"
               
-              # Xóa file tạm
-              rm -f "$f" "${filename}.jpg"
+              sed -i "s|${filename_no_ext}\.html|${NEW_VAL}|g" "$M3U8_FILE"
+              
+              # Xóa file tạm để tránh đầy ổ cứng
+              rm -f "$f" "${filename_no_ext}.jpg"
             else
-              echo "Error Uploading: $filename"
-              echo "Response: $RESPONSE"
+              echo "FAILED: $filename_no_ext"
             fi
             
-            # Nghỉ ngắn tránh Rate Limit Discord
+            # Nghỉ 0.5s để tránh Discord Rate Limit
             sleep 0.5
           done
 
       # =======================
-      # b4: Callback thành công
+      # b4: Hoàn tất và gửi dữ liệu
       # =======================
-      - name: Callback Success
+      - name: Finalize
         if: success()
         run: |
-          # Gửi file m3u8 cuối cùng lên hit.ssplay.net
+          # Gửi nội dung m3u8 đã sửa tới server hit
           curl -X POST "https://hit.ssplay.net/m3u81.php?slug=${{ inputs.slug }}" \
             -H "Content-Type: text/plain" \
             --data-binary @"output/${{ inputs.slug }}.m3u8"
           
-          # Callback thông báo hoàn tất
+          # Callback báo thành công
           curl -G "https://cp.ssplay.net/cf-dc.php" \
             --data-urlencode "dc=5" \
             --data-urlencode "slug=${{ inputs.slug }}"
 
-      # =======================
-      # b5: Callback thất bại
-      # =======================
       - name: Callback Failure
         if: failure()
         run: |
