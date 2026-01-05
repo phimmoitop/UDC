@@ -19,12 +19,12 @@ jobs:
 
     steps:
       # =======================
-      # Setup FFmpeg
+      # Setup FFmpeg + PHP
       # =======================
-      - name: Install ffmpeg
+      - name: Install ffmpeg + php
         run: |
           sudo apt update
-          sudo apt install -y ffmpeg curl jq
+          sudo apt install -y ffmpeg curl jq php
 
       # =======================
       # b1: Download m3u8 → mp4
@@ -75,6 +75,9 @@ jobs:
 
           IFS=',' read -ra WEBHOOKS <<< "${{ inputs.webhooklist }}"
           COUNT=0
+          IDX=-1
+          HOOK=""
+          HOOK_ID=""
 
           for f in output/*.html; do
             [ -e "$f" ] || continue
@@ -83,10 +86,13 @@ jobs:
             echo "$IMG1$IMG2" > "output_jpg/${path}.jpg"
             rm -f "$f"
 
-            IDX=$((RANDOM % ${#WEBHOOKS[@]}))
-            HOOK_PART="${WEBHOOKS[$IDX]}"
-            HOOK_ID="${HOOK_PART%%/*}"
-            HOOK="https://discord.com/api/webhooks/${WEBHOOKS[$IDX]}"
+            # chọn webhook mới khi bắt đầu chu kỳ
+            if [ $COUNT -eq 0 ]; then
+              IDX=$((RANDOM % ${#WEBHOOKS[@]}))
+              HOOK_PART="${WEBHOOKS[$IDX]}"
+              HOOK_ID="${HOOK_PART%%/*}"
+              HOOK="https://discord.com/api/webhooks/${WEBHOOKS[$IDX]}"
+            fi
 
             RESPONSE=$(curl -s -X POST "$HOOK" \
               -H "Content-Type: multipart/form-data" \
@@ -100,7 +106,29 @@ jobs:
             if [ "${#DC_ID}" -eq 19 ]; then
               SAVE="output/${{ inputs.slug }}.m3u8"
               M3U8=$(cat "$SAVE")
-              FAKEM3U8=$(echo "$M3U8" | sed "s|$path|/imeCDN/${HOOK_ID}/${DC_ID}|g")
+
+              # define encode() inline and encode từng phần
+              read -r ENC_HOOK_ID ENC_DC_ID <<EOF
+              $(php -r '
+              function encode($string,$key="zzo0ozz") {
+                $key = sha1($key);
+                $strLen = strlen($string);
+                $keyLen = strlen($key);
+                $j=0; $hash="";
+                for ($i=0; $i<$strLen; $i++) {
+                  $ordStr = ord(substr($string,$i,1));
+                  if ($j == $keyLen) { $j = 0; }
+                  $ordKey = ord(substr($key,$j,1));
+                  $j++;
+                  $hash .= strrev(base_convert(dechex($ordStr + $ordKey),16,36));
+                }
+                return $hash;
+              }
+              echo encode("'"${HOOK_ID}"'"), " ", encode("'"${DC_ID}"'");
+              ')
+              EOF
+
+              FAKEM3U8=$(echo "$M3U8" | sed "s|$path|/imeCDN/${ENC_HOOK_ID}/${ENC_DC_ID}|g")
               echo "$FAKEM3U8" > "$SAVE"
               rm -f "output_jpg/${path}.jpg"
             fi
