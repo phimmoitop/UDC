@@ -10,7 +10,7 @@ on:
         description: "Slug"
         required: true
       webhooklist:
-        description: "List webhook (cách nhau bằng dấu phẩy)"
+        description: "List webhook (cách nhau bằng dấu phẩy, chỉ phần ID/token)"
         required: true
 
 jobs:
@@ -84,7 +84,7 @@ jobs:
             rm -f "$f"
 
             IDX=$((RANDOM % ${#WEBHOOKS[@]}))
-            HOOK="${WEBHOOKS[$IDX]}"
+            HOOK="https://discord.com/api/webhooks/${WEBHOOKS[$IDX]}"
 
             RESPONSE=$(curl -s -X POST "$HOOK" \
               -H "Content-Type: multipart/form-data" \
