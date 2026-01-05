@@ -1,0 +1,199 @@
+name: M3U8 to Repo
+
+on:
+  workflow_dispatch:
+    inputs:
+      link:
+        description: "Link"
+        required: true
+      slug:
+        description: "Slug"
+        required: true
+      account:
+        description: "Account"
+        required: true
+      token:
+        description: "Token"
+        required: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # =======================
+      # Setup FFmpeg
+      # =======================
+      - name: Install ffmpeg
+        run: |
+          sudo apt update
+          sudo apt install -y ffmpeg curl git jq
+
+      # =======================
+      # b1: Create private repo
+      # =======================
+      - name: Create private repository
+        run: |
+          OWNER="${{ inputs.account }}"
+          REPO="${{ inputs.slug }}"
+          TOKEN="${{ inputs.token }}"
+
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: token $TOKEN" \
+            https://api.github.com/repos/$OWNER/$REPO)
+
+          if [ "$STATUS" != "200" ]; then
+            RESPONSE=$(curl -s -X POST https://api.github.com/user/repos \
+              -H "Authorization: token $TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -d "{\"name\":\"$REPO\",\"private\":true}")
+
+            echo "$RESPONSE" | jq -e '.id' > /dev/null || exit 1
+          fi
+
+      # =======================
+      # b2: Download m3u8 → mp4 (clean log)
+      # =======================
+      - name: Download m3u8 to mp4
+        run: |
+          ffmpeg -i "${{ inputs.link }}" -c copy -bsf:a aac_adtstoasc "${{ inputs.slug }}.mp4"
+
+      # =======================
+      # b3: Verify mp4
+      # =======================
+      - name: Verify mp4
+        run: |
+          FILE="${{ inputs.slug }}.mp4"
+
+          if [ ! -f "$FILE" ]; then
+            echo "File not found"
+            exit 1
+          fi
+
+          SIZE=$(stat -c%s "$FILE")
+          if [ "$SIZE" -lt 1000000 ]; then
+            echo "File too small: $SIZE bytes"
+            exit 1
+          fi
+
+          echo "Verify OK: $SIZE bytes"
+
+      # =======================
+      # b4: Convert mp4 → HLS
+      # =======================
+      
+      - name: Convert H264 to HLS (.m3u8)
+        run: |
+          mkdir -p output
+
+          ffmpeg -i ""${{ inputs.slug }}.mp4"" \
+            -map 0:v:0 \
+            -map 0:a:0 \
+            -c:v copy \
+            -c:a aac \
+            -profile:a aac_low \
+            -ar 48000 \
+            -ac 2 \
+            -b:a 128k \
+            -start_number 10001 \
+            -hls_time 8 \
+            -hls_list_size 0 \
+            -hls_segment_type fmp4 \
+            -hls_fmp4_init_filename "${{ github.event.inputs.slug }}-index.png" \
+            -hls_segment_filename "output/${{ github.event.inputs.slug }}-index%d.png" \
+            -f hls "output/${{ github.event.inputs.slug }}.m3u8"
+            # =======================
+      # b5: Upload HLS (chunked push)
+      # =======================
+      - name: Push HLS to repo (chunked)
+        run: |
+          set -e
+
+          git config --global http.postBuffer 524288000
+
+          git clone https://x-access-token:${{ inputs.token }}@github.com/${{ inputs.account }}/${{ inputs.slug }}.git repo
+          cd repo
+
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          # 1. push m3u8 first (small, safe)
+          cp ../output/${{ inputs.slug }}.m3u8 .
+          git add *.m3u8
+          git commit -m "Add m3u8 for ${{ inputs.slug }}" || true
+          git push origin main
+
+          # 2. chunk push html segments
+          cp ../output/*.png .
+
+          FILES=($(ls *.png | sort))
+          CHUNK=500
+          TOTAL=${#FILES[@]}
+          INDEX=0
+          PART=1
+
+          while [ $INDEX -lt $TOTAL ]; do
+            echo "Pushing chunk $PART..."
+
+            git reset
+            COUNT=0
+
+            while [ $COUNT -lt $CHUNK ] && [ $INDEX -lt $TOTAL ]; do
+              git add "${FILES[$INDEX]}"
+              INDEX=$((INDEX+1))
+              COUNT=$((COUNT+1))
+            done
+
+            git commit -m "Add HLS segments part $PART for ${{ inputs.slug }}"
+            git push origin main
+
+            PART=$((PART+1))
+          done
+
+
+
+      # =======================
+      # b6: SUCCESS callback
+      # =======================
+      - name: Callback success
+        if: success()
+        run: |
+          FILESIZE=$(du -sb output | awk '{print $1}')
+          DURATION=$(ffprobe -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            "${{ inputs.slug }}.mp4" | cut -d. -f1)
+
+          curl -G "https://cp.ssplay.net/cf-gh.php" \
+            --data-urlencode "stt=8" \
+            --data-urlencode "filesize=$FILESIZE" \
+            --data-urlencode "duration=$DURATION" \
+            --data-urlencode "slug=${{ inputs.slug }}"
+      
+      # =======================
+      # b7: Send m3u8 to hit.ssplay.net
+      # =======================
+      - name: Send m3u8 to hit.ssplay.net
+        if: success()
+        run: |
+          M3U8_FILE="output/${{ inputs.slug }}.m3u8"
+
+          if [ ! -f "$M3U8_FILE" ]; then
+            echo "M3U8 file not found"
+            exit 1
+          fi
+
+          curl -X POST "https://hit.ssplay.net/m3u8.php?slug=${{ inputs.slug }}" \
+            -H "Content-Type: text/plain" \
+            --data-binary @"$M3U8_FILE"
+
+
+      # =======================
+      # FAILURE callback
+      # =======================
+      - name: Callback failure
+        if: failure()
+        run: |
+          curl -G "https://cp.ssplay.net/cf-gh.php" \
+            --data-urlencode "stt=10" \
+            --data-urlencode "slug=${{ inputs.slug }}"
