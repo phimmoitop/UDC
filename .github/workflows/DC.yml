@@ -147,7 +147,7 @@ jobs:
         if: success()
         run: |
           # Gửi nội dung m3u8 đã sửa tới server hit
-          curl -X POST "https://hit.ssplay.net/m3u81.php?slug=${{ inputs.slug }}" \
+          curl -X POST "https://cp.ssplay.net/m3u8-dc.php?slug=${{ inputs.slug }}" \
             -H "Content-Type: text/plain" \
             --data-binary @"output/${{ inputs.slug }}.m3u8"
           
